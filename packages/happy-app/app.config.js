@@ -1,24 +1,24 @@
 const variant = process.env.APP_ENV || 'development';
 const name = {
-    development: "Happy (dev)",
-    preview: "Happy (preview)",
-    production: "Happy"
+    development: "Happy Work (dev)",
+    preview: "Happy Work (preview)",
+    production: "Happy Work"
 }[variant];
 const bundleId = {
-    development: "com.slopus.happy.dev",
-    preview: "com.slopus.happy.preview",
-    production: "com.ex3ndr.happy"
+    development: "com.youhwan.happywork.dev",
+    preview: "com.youhwan.happywork.preview",
+    production: "com.youhwan.happywork"
 }[variant];
 
 export default {
     expo: {
         name,
-        slug: "happy",
+        slug: "happy-work",
         version: "1.6.2",
         runtimeVersion: "20",
         orientation: "default",
         icon: "./sources/assets/images/icon.png",
-        scheme: "happy",
+        scheme: "happywork",
         userInterfaceStyle: "automatic",
         newArchEnabled: true,
         notification: {
@@ -149,12 +149,11 @@ export default {
                 }
             ]
         ],
-        updates: {
-            url: "https://u.expo.dev/4558dd3d-cd5a-47cd-bad9-e591a241cc06",
-            requestHeaders: {
-                "expo-channel-name": "production"
-            }
-        },
+        // updates disabled for fork — no EAS Update
+        // updates: {
+        //     url: "https://u.expo.dev/...",
+        //     requestHeaders: { "expo-channel-name": "production" }
+        // },
         experiments: {
             typedRoutes: true
         },
@@ -162,9 +161,8 @@ export default {
             router: {
                 root: "./sources/app"
             },
-            eas: {
-                projectId: "4558dd3d-cd5a-47cd-bad9-e591a241cc06"
-            },
+            // eas project ID — will be set after eas init
+            // eas: { projectId: "..." },
             app: {
                 postHogKey: process.env.EXPO_PUBLIC_POSTHOG_API_KEY,
                 revenueCatAppleKey: process.env.EXPO_PUBLIC_REVENUE_CAT_APPLE,
@@ -172,6 +170,6 @@ export default {
                 revenueCatStripeKey: process.env.EXPO_PUBLIC_REVENUE_CAT_STRIPE
             }
         },
-        owner: "bulkacorp"
+        // owner removed for fork
     }
 };
