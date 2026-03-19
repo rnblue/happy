@@ -23,6 +23,8 @@ export type SyncSocketListener = (state: SyncSocketState) => void;
 // Main Class
 //
 
+const RPC_TIMEOUT = 60000; // 60 seconds
+
 class ApiSocket {
 
     // State
@@ -117,15 +119,15 @@ class ApiSocket {
             throw new Error(`Session encryption not found for ${sessionId}`);
         }
         
-        const result = await this.socket!.emitWithAck('rpc-call', {
+        const result = await this.socket!.timeout(RPC_TIMEOUT).emitWithAck('rpc-call', {
             method: `${sessionId}:${method}`,
             params: await sessionEncryption.encryptRaw(params)
         });
-        
+
         if (result.ok) {
             return await sessionEncryption.decryptRaw(result.result) as R;
         }
-        throw new Error('RPC call failed');
+        throw new Error(result.error || 'RPC call failed');
     }
 
     /**
@@ -137,7 +139,7 @@ class ApiSocket {
             throw new Error(`Machine encryption not found for ${machineId}`);
         }
 
-        const result = await this.socket!.emitWithAck('rpc-call', {
+        const result = await this.socket!.timeout(RPC_TIMEOUT).emitWithAck('rpc-call', {
             method: `${machineId}:${method}`,
             params: await machineEncryption.encryptRaw(params)
         });
@@ -145,7 +147,7 @@ class ApiSocket {
         if (result.ok) {
             return await machineEncryption.decryptRaw(result.result) as R;
         }
-        throw new Error('RPC call failed');
+        throw new Error(result.error || 'RPC call failed');
     }
 
     send(event: string, data: any) {
@@ -157,7 +159,7 @@ class ApiSocket {
         if (!this.socket) {
             throw new Error('Socket not connected');
         }
-        return await this.socket.emitWithAck(event, data);
+        return await this.socket.timeout(RPC_TIMEOUT).emitWithAck(event, data);
     }
 
     //

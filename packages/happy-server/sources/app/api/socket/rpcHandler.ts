@@ -108,7 +108,7 @@ export function rpcHandler(userId: string, socket: Socket, rpcListeners: Map<str
 
             // Forward the RPC request to the target socket using emitWithAck
             try {
-                const response = await targetSocket.timeout(30000).emitWithAck('rpc-request', {
+                const response = await targetSocket.timeout(60000).emitWithAck('rpc-request', {
                     method,
                     params
                 });

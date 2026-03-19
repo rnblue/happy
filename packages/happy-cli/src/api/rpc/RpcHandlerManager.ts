@@ -13,6 +13,8 @@ import {
 } from './types';
 import { Socket } from 'socket.io-client';
 
+const HANDLER_TIMEOUT = 55000; // 55 seconds — must be shorter than server's 60s RPC timeout
+
 export class RpcHandlerManager {
     private handlers: RpcHandlerMap = new Map();
     private readonly scopePrefix: string;
@@ -68,9 +70,14 @@ export class RpcHandlerManager {
             // Decrypt the incoming params
             const decryptedParams = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(request.params));
 
-            // Call the handler
+            // Call the handler with timeout
             this.logger('[RPC] Calling handler', { method: request.method });
-            const result = await handler(decryptedParams);
+            const result = await Promise.race([
+                handler(decryptedParams),
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error(`RPC handler timed out after ${HANDLER_TIMEOUT}ms`)), HANDLER_TIMEOUT)
+                )
+            ]);
             this.logger('[RPC] Handler returned', { method: request.method, hasResult: result !== undefined });
 
             // Encrypt and return the response
