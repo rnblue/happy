@@ -35,6 +35,7 @@ export default {
         ios: {
             supportsTablet: true,
             bundleIdentifier: bundleId,
+            appleTeamId: "L3R5XVVYEQ",
             config: {
                 usesNonExemptEncryption: false
             },
