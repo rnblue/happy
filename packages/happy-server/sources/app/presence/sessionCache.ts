@@ -49,21 +49,21 @@ class ActivityCache {
     async isSessionValid(sessionId: string, userId: string): Promise<boolean> {
         const now = Date.now();
         const cached = this.sessionCache.get(sessionId);
-        
+
         // Check cache first
         if (cached && cached.validUntil > now && cached.userId === userId) {
             sessionCacheCounter.inc({ operation: 'session_validation', result: 'hit' });
             return true;
         }
-        
+
         sessionCacheCounter.inc({ operation: 'session_validation', result: 'miss' });
-        
+
         // Cache miss - check database
         try {
             const session = await db.session.findUnique({
                 where: { id: sessionId, accountId: userId }
             });
-            
+
             if (session) {
                 // Cache the result
                 this.sessionCache.set(sessionId, {
@@ -74,9 +74,22 @@ class ActivityCache {
                 });
                 return true;
             }
-            
+
             return false;
         } catch (error) {
+            // Treat transient DB errors (pool timeout, connection issues) as a
+            // short grace period to break retry storms that keep the pool busy.
+            // Real validation resumes on next miss after the grace expires.
+            const code = (error as { code?: string })?.code;
+            if (code === 'P2024' || code === 'P1001' || code === 'P1008' || code === 'P1017') {
+                this.sessionCache.set(sessionId, {
+                    validUntil: now + 5 * 1000,
+                    lastUpdateSent: 0,
+                    pendingUpdate: null,
+                    userId
+                });
+                return true;
+            }
             log({ module: 'session-cache', level: 'error' }, `Error validating session ${sessionId}: ${error}`);
             return false;
         }
@@ -85,15 +98,15 @@ class ActivityCache {
     async isMachineValid(machineId: string, userId: string): Promise<boolean> {
         const now = Date.now();
         const cached = this.machineCache.get(machineId);
-        
+
         // Check cache first
         if (cached && cached.validUntil > now && cached.userId === userId) {
             sessionCacheCounter.inc({ operation: 'machine_validation', result: 'hit' });
             return true;
         }
-        
+
         sessionCacheCounter.inc({ operation: 'machine_validation', result: 'miss' });
-        
+
         // Cache miss - check database
         try {
             const machine = await db.machine.findUnique({
@@ -104,7 +117,7 @@ class ActivityCache {
                     }
                 }
             });
-            
+
             if (machine) {
                 // Cache the result
                 this.machineCache.set(machineId, {
@@ -115,9 +128,19 @@ class ActivityCache {
                 });
                 return true;
             }
-            
+
             return false;
         } catch (error) {
+            const code = (error as { code?: string })?.code;
+            if (code === 'P2024' || code === 'P1001' || code === 'P1008' || code === 'P1017') {
+                this.machineCache.set(machineId, {
+                    validUntil: now + 5 * 1000,
+                    lastUpdateSent: 0,
+                    pendingUpdate: null,
+                    userId
+                });
+                return true;
+            }
             log({ module: 'session-cache', level: 'error' }, `Error validating machine ${machineId}: ${error}`);
             return false;
         }
