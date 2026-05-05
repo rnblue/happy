@@ -80,18 +80,19 @@ class ActivityCache {
             // Treat transient DB errors (pool timeout, connection issues) as a
             // short grace period to break retry storms that keep the pool busy.
             // Real validation resumes on next miss after the grace expires.
-            const code = (error as { code?: string })?.code;
-            if (code === 'P2024' || code === 'P1001' || code === 'P1008' || code === 'P1017') {
-                this.sessionCache.set(sessionId, {
-                    validUntil: now + 5 * 1000,
-                    lastUpdateSent: 0,
-                    pendingUpdate: null,
-                    userId
-                });
-                return true;
-            }
-            log({ module: 'session-cache', level: 'error' }, `Error validating session ${sessionId}: ${error}`);
-            return false;
+            // Any DB error → grace cache for 5s to break retry storms.
+            // Both PrismaClientKnownRequestError (P2024 etc) and
+            // PrismaClientUnknownRequestError can fire under pool exhaustion.
+            // A genuine "session not found" goes through `if (session)` above,
+            // not this catch — so caching as valid here is safe.
+            this.sessionCache.set(sessionId, {
+                validUntil: now + 5 * 1000,
+                lastUpdateSent: 0,
+                pendingUpdate: null,
+                userId
+            });
+            log({ module: 'session-cache', level: 'warn' }, `Validation deferred for ${sessionId} (DB error, grace 5s)`);
+            return true;
         }
     }
 
@@ -131,18 +132,14 @@ class ActivityCache {
 
             return false;
         } catch (error) {
-            const code = (error as { code?: string })?.code;
-            if (code === 'P2024' || code === 'P1001' || code === 'P1008' || code === 'P1017') {
-                this.machineCache.set(machineId, {
-                    validUntil: now + 5 * 1000,
-                    lastUpdateSent: 0,
-                    pendingUpdate: null,
-                    userId
-                });
-                return true;
-            }
-            log({ module: 'session-cache', level: 'error' }, `Error validating machine ${machineId}: ${error}`);
-            return false;
+            this.machineCache.set(machineId, {
+                validUntil: now + 5 * 1000,
+                lastUpdateSent: 0,
+                pendingUpdate: null,
+                userId
+            });
+            log({ module: 'session-cache', level: 'warn' }, `Validation deferred for machine ${machineId} (DB error, grace 5s)`);
+            return true;
         }
     }
 
@@ -206,27 +203,33 @@ class ActivityCache {
             }
         }
         
-        // Batch update sessions
+        // Batch update sessions — sequentially to keep pool pressure low.
+        // Promise.all here would grab N connections at once; one slow query
+        // then starves the rest of the server.
         if (sessionUpdates.length > 0) {
-            try {
-                await Promise.all(sessionUpdates.map(update =>
-                    db.session.update({
+            let ok = 0;
+            for (const update of sessionUpdates) {
+                try {
+                    await db.session.update({
                         where: { id: update.id },
                         data: { lastActiveAt: new Date(update.timestamp), active: true }
-                    })
-                ));
-                
-                log({ module: 'session-cache' }, `Flushed ${sessionUpdates.length} session updates`);
-            } catch (error) {
-                log({ module: 'session-cache', level: 'error' }, `Error updating sessions: ${error}`);
+                    });
+                    ok++;
+                } catch (error) {
+                    log({ module: 'session-cache', level: 'warn' }, `Skipped session update ${update.id}: ${(error as Error).message?.slice(0, 80)}`);
+                }
+            }
+            if (ok > 0) {
+                log({ module: 'session-cache' }, `Flushed ${ok}/${sessionUpdates.length} session updates`);
             }
         }
-        
-        // Batch update machines
+
+        // Batch update machines — same sequential approach.
         if (machineUpdates.length > 0) {
-            try {
-                await Promise.all(machineUpdates.map(update =>
-                    db.machine.update({
+            let ok = 0;
+            for (const update of machineUpdates) {
+                try {
+                    await db.machine.update({
                         where: {
                             accountId_id: {
                                 accountId: update.userId,
@@ -234,12 +237,14 @@ class ActivityCache {
                             }
                         },
                         data: { lastActiveAt: new Date(update.timestamp) }
-                    })
-                ));
-                
-                log({ module: 'session-cache' }, `Flushed ${machineUpdates.length} machine updates`);
-            } catch (error) {
-                log({ module: 'session-cache', level: 'error' }, `Error updating machines: ${error}`);
+                    });
+                    ok++;
+                } catch (error) {
+                    log({ module: 'session-cache', level: 'warn' }, `Skipped machine update ${update.id}: ${(error as Error).message?.slice(0, 80)}`);
+                }
+            }
+            if (ok > 0) {
+                log({ module: 'session-cache' }, `Flushed ${ok}/${machineUpdates.length} machine updates`);
             }
         }
     }
