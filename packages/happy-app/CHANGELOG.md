@@ -1,5 +1,44 @@
 # Changelog
 
+## Version 9 - 2026-04-26
+
+Voice reliability, better content rendering, and a new diff viewer.
+
+- Fixed voice calls breaking on second session — works reliably every time now
+- Tables and code blocks scroll horizontally instead of overflowing
+- New diff viewer with syntax highlighting and unified/split toggle (desktop and web only)
+- Model and effort level choices now persist on mobile
+- Permission prompts (accept/reject) no longer get lost
+- Settings no longer randomly reset during sync
+- Added scroll-to-bottom button in chat
+- Delete machines you no longer use from settings
+
+## Version 7 - 2026-04-08
+
+This preview release expands the current update with the latest Gemini models, a smarter voice onboarding flow, and more reliable Happy CLI sessions for plan approvals and Codex turns.
+
+- Update Happy CLI with `npm i -g happy`
+- Added the latest Gemini models to the picker
+- Improved voice onboarding with smarter first-run prompts and clearer upgrade guidance for free users
+- Fixed Happy CLI plan approval flows so Accept and Reject buttons show up reliably in plan mode
+- Fixed Happy CLI background task updates and Codex turns that could sometimes hang or fail to complete
+
+## Version 6 - 2026-03-19
+
+This is the biggest update since launch — a redesigned session creation experience, Git worktree management, expanded agent support.
+
+- New session composer screen with machine selection, worktree picker, draft persistence, and offline machine visibility.
+- Git worktree management — list, create, and select worktrees from the app. Worktrees auto-cleanup on session delete.
+- Automatic plan mode switching when your agent enters planning mode.
+- OpenClaw added as a selectable AI agent alongside Claude Code and Codex.
+- Session quick actions for faster interaction with active sessions.
+- Session resume support — pick up where you left off.
+- Delete sessions directly from the session info screen.
+- Renamed "bypass" permission mode to "yolo" with updated styling.
+- Improved markdown rendering and message formatting.
+- Improved message sync reliability with edge case fixes.
+- Various UI polish: send spinner, hidden internal tool calls, improved spacing.
+
 ## Version 5 - 2025-12-22
 
 This release expands AI agent support and refines the voice experience, while improving markdown rendering for a better chat experience.

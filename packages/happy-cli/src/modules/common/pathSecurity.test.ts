@@ -1,17 +1,27 @@
 import { describe, it, expect } from 'vitest';
+import { resolve } from 'path';
 import { validatePath } from './pathSecurity';
 
 describe('validatePath', () => {
-    const workingDir = '/home/user/project';
+    const workingDir = resolve('/home/user/project');
 
     it('should allow paths within working directory', () => {
-        expect(validatePath('/home/user/project/file.txt', workingDir).valid).toBe(true);
-        expect(validatePath('file.txt', workingDir).valid).toBe(true);
-        expect(validatePath('./src/file.txt', workingDir).valid).toBe(true);
+        expect(validatePath(resolve('/home/user/project/file.txt'), workingDir)).toEqual({
+            valid: true,
+            resolvedPath: resolve('/home/user/project/file.txt'),
+        });
+        expect(validatePath('file.txt', workingDir)).toEqual({
+            valid: true,
+            resolvedPath: resolve('/home/user/project/file.txt'),
+        });
+        expect(validatePath('./src/file.txt', workingDir)).toEqual({
+            valid: true,
+            resolvedPath: resolve('/home/user/project/src/file.txt'),
+        });
     });
 
     it('should reject paths outside working directory', () => {
-        const result = validatePath('/etc/passwd', workingDir);
+        const result = validatePath(resolve('/etc/passwd'), workingDir);
         expect(result.valid).toBe(false);
         expect(result.error).toContain('outside the working directory');
     });
@@ -23,7 +33,13 @@ describe('validatePath', () => {
     });
 
     it('should allow the working directory itself', () => {
-        expect(validatePath('.', workingDir).valid).toBe(true);
-        expect(validatePath(workingDir, workingDir).valid).toBe(true);
+        expect(validatePath('.', workingDir)).toEqual({
+            valid: true,
+            resolvedPath: resolve('/home/user/project'),
+        });
+        expect(validatePath(workingDir, workingDir)).toEqual({
+            valid: true,
+            resolvedPath: resolve('/home/user/project'),
+        });
     });
 });

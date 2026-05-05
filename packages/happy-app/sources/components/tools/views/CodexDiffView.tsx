@@ -1,121 +1,55 @@
 import * as React from 'react';
 import { View, Text } from 'react-native';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { StyleSheet } from 'react-native-unistyles';
 import { ToolCall } from '@/sync/typesMessage';
 import { ToolSectionView } from '../ToolSectionView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { Metadata } from '@/sync/storageTypes';
-import { useSetting } from '@/sync/storage';
-import { t } from '@/text';
+import { parseUnifiedDiff } from '@/utils/codexUnifiedDiff';
+import { getPatchDiffStats } from '@/components/diff/calculateDiff';
 
 interface CodexDiffViewProps {
     tool: ToolCall;
     metadata: Metadata | null;
 }
 
-/**
- * Parse a unified diff to extract old and new content
- * This is a simplified parser that handles basic unified diff format
- */
-function parseUnifiedDiff(unifiedDiff: string): { oldText: string; newText: string; fileName?: string } {
-    const lines = unifiedDiff.split('\n');
-    const oldLines: string[] = [];
-    const newLines: string[] = [];
-    let fileName: string | undefined;
-    let inHunk = false;
-
-    for (const line of lines) {
-        // Extract filename from diff header
-        if (line.startsWith('+++ b/') || line.startsWith('+++ ')) {
-            fileName = line.replace(/^\+\+\+ (b\/)?/, '');
-            continue;
-        }
-
-        // Skip other header lines
-        if (line.startsWith('diff --git') || 
-            line.startsWith('index ') || 
-            line.startsWith('---') ||
-            line.startsWith('new file mode') ||
-            line.startsWith('deleted file mode')) {
-            continue;
-        }
-
-        // Hunk header
-        if (line.startsWith('@@')) {
-            inHunk = true;
-            continue;
-        }
-
-        if (inHunk) {
-            if (line.startsWith('+')) {
-                // Added line
-                newLines.push(line.substring(1));
-            } else if (line.startsWith('-')) {
-                // Removed line
-                oldLines.push(line.substring(1));
-            } else if (line.startsWith(' ')) {
-                // Context line (unchanged)
-                oldLines.push(line.substring(1));
-                newLines.push(line.substring(1));
-            } else if (line === '\\ No newline at end of file') {
-                // Skip this meta line
-                continue;
-            } else if (line === '') {
-                // Empty line in diff
-                oldLines.push('');
-                newLines.push('');
-            }
-        }
-    }
-
-    return {
-        oldText: oldLines.join('\n'),
-        newText: newLines.join('\n'),
-        fileName
-    };
-}
-
 export const CodexDiffView = React.memo<CodexDiffViewProps>(({ tool, metadata }) => {
-    const { theme } = useUnistyles();
-    const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
     const { input } = tool;
+    const patch = typeof input?.unified_diff === 'string' ? input.unified_diff : undefined;
+    const fileName = patch ? parseUnifiedDiff(patch).fileName : undefined;
+    const stats = React.useMemo(() => (patch ? getPatchDiffStats(patch) : null), [patch]);
 
-    // Parse the unified diff
-    let oldText = '';
-    let newText = '';
-    let fileName: string | undefined;
-
-    if (input?.unified_diff && typeof input.unified_diff === 'string') {
-        const parsed = parseUnifiedDiff(input.unified_diff);
-        oldText = parsed.oldText;
-        newText = parsed.newText;
-        fileName = parsed.fileName;
-    }
-
-    // If we have a filename, show it as a header
-    const fileHeader = fileName ? (
-        <View style={styles.fileHeader}>
-            <Text style={styles.fileName}>{fileName}</Text>
-        </View>
-    ) : null;
+    if (!patch) return null;
 
     return (
         <>
-            {fileHeader}
+            {fileName ? (
+                <View style={styles.fileHeader}>
+                    <Text style={styles.fileName} numberOfLines={1}>{fileName}</Text>
+                    {stats && (stats.additions > 0 || stats.deletions > 0) ? (
+                        <DiffStats additions={stats.additions} deletions={stats.deletions} />
+                    ) : null}
+                </View>
+            ) : null}
             <ToolSectionView fullWidth>
-                <ToolDiffView 
-                    oldText={oldText} 
-                    newText={newText} 
-                    showLineNumbers={showLineNumbersInToolViews}
-                    showPlusMinusSymbols={showLineNumbersInToolViews}
-                />
+                <ToolDiffView patch={patch} fileName={fileName} />
             </ToolSectionView>
         </>
     );
 });
 
+const DiffStats = React.memo<{ additions: number; deletions: number }>(({ additions, deletions }) => (
+    <View style={styles.stats}>
+        {additions > 0 ? <Text style={styles.added}>+{additions}</Text> : null}
+        {deletions > 0 ? <Text style={styles.removed}>-{deletions}</Text> : null}
+    </View>
+));
+
 const styles = StyleSheet.create((theme) => ({
     fileHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
         paddingHorizontal: 16,
         paddingVertical: 8,
         backgroundColor: theme.colors.surfaceHigh,
@@ -123,8 +57,23 @@ const styles = StyleSheet.create((theme) => ({
         borderBottomColor: theme.colors.divider,
     },
     fileName: {
+        flex: 1,
         fontSize: 13,
         color: theme.colors.textSecondary,
         fontFamily: 'monospace',
+    },
+    stats: {
+        flexDirection: 'row',
+        gap: 8,
+    },
+    added: {
+        fontSize: 12,
+        fontFamily: 'monospace',
+        color: '#34C759',
+    },
+    removed: {
+        fontSize: 12,
+        fontFamily: 'monospace',
+        color: '#FF3B30',
     },
 }));

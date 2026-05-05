@@ -7,6 +7,7 @@
 
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
+import type { AgentState } from "@/api/types";
 import {
     BasePermissionHandler,
     PermissionResult,
@@ -20,12 +21,42 @@ export type { PermissionResult, PendingRequest };
  * Codex-specific permission handler.
  */
 export class CodexPermissionHandler extends BasePermissionHandler {
+    // Exact tool names that should always be auto-approved. Include the bare
+    // form (used by Codex elicitation messages like `tool "change_title"`)
+    // and the MCP-qualified form for defense in depth.
+    private static readonly ALWAYS_AUTO_APPROVE_NAMES: ReadonlySet<string> = new Set([
+        'change_title',
+        'mcp__happy__change_title',
+    ]);
+
+    // Tool-call IDs that should auto-approve when they exactly match one of
+    // these values or start with `<name>-` (e.g. `change_title-1765385846663`).
+    // Substring matching was a bypass vector — any tool whose ID happened to
+    // contain `change_title` as a substring would be silently approved.
+    private static readonly ALWAYS_AUTO_APPROVE_ID_PREFIXES: readonly string[] = [
+        'change_title',
+    ];
+
     constructor(session: ApiSessionClient) {
         super(session);
     }
 
     protected getLogPrefix(): string {
         return '[Codex]';
+    }
+
+    private shouldAutoApprove(toolName: string, toolCallId: string): boolean {
+        if (CodexPermissionHandler.ALWAYS_AUTO_APPROVE_NAMES.has(toolName)) {
+            return true;
+        }
+
+        for (const prefix of CodexPermissionHandler.ALWAYS_AUTO_APPROVE_ID_PREFIXES) {
+            if (toolCallId === prefix || toolCallId.startsWith(`${prefix}-`)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -40,6 +71,27 @@ export class CodexPermissionHandler extends BasePermissionHandler {
         toolName: string,
         input: unknown
     ): Promise<PermissionResult> {
+        if (this.shouldAutoApprove(toolName, toolCallId)) {
+            logger.debug(`${this.getLogPrefix()} Auto-approving tool ${toolName} (${toolCallId})`);
+
+            this.session.updateAgentState((currentState) => ({
+                ...currentState,
+                completedRequests: {
+                    ...currentState.completedRequests,
+                    [toolCallId]: {
+                        tool: toolName,
+                        arguments: input,
+                        createdAt: Date.now(),
+                        completedAt: Date.now(),
+                        status: 'approved',
+                        decision: 'approved',
+                    },
+                },
+            } satisfies AgentState));
+
+            return { decision: 'approved' };
+        }
+
         return new Promise<PermissionResult>((resolve, reject) => {
             // Store the pending request
             this.pendingRequests.set(toolCallId, {

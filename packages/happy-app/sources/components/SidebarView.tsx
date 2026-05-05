@@ -15,6 +15,9 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useInboxHasContent } from '@/hooks/useInboxHasContent';
 import { Ionicons } from '@expo/vector-icons';
+import { isTauri } from '@/utils/isTauri';
+
+const TAURI_TRAFFIC_LIGHT_WIDTH = 72;
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -27,7 +30,8 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     header: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: 16,
+        paddingLeft: isTauri() ? TAURI_TRAFFIC_LIGHT_WIDTH + 16 : 16,
+        paddingRight: 16,
         backgroundColor: theme.colors.groupped.background,
         position: 'relative',
     },
@@ -192,7 +196,7 @@ export const SidebarView = React.memo(() => {
     const shouldLeftJustify = settings.experiments || sidebarWidth < 340;
 
     const handleNewSession = React.useCallback(() => {
-        router.push('/new');
+        router.navigate('/new');
     }, [router]);
 
     // Title content used in both centered and left-justified modes (DRY)
@@ -215,35 +219,42 @@ export const SidebarView = React.memo(() => {
         </>
     );
 
+    const inTauri = isTauri();
     return (
         <>
             <View style={[styles.container, { paddingTop: safeArea.top }]}>
-                <View style={[styles.header, { height: headerHeight }]}>
-                    {/* Logo - always first */}
-                    <View style={styles.logoContainer}>
-                        <Image
-                            source={theme.dark ? require('@/assets/images/logo-white.png') : require('@/assets/images/logo-black.png')}
-                            contentFit="contain"
-                            style={[styles.logo, { height: 24, width: 24 }]}
-                        />
-                    </View>
+                <View
+                    style={[styles.header, { height: headerHeight }]}
+                    {...(inTauri ? { dataSet: { tauriDragRegion: 'true' } } : {})}
+                >
+                    {!inTauri && (
+                        <View style={styles.logoContainer}>
+                            <Image
+                                source={theme.dark ? require('@/assets/images/logo-white.png') : require('@/assets/images/logo-black.png')}
+                                contentFit="contain"
+                                style={[styles.logo, { height: 24, width: 24 }]}
+                            />
+                        </View>
+                    )}
 
-                    {/* Left-justified title - in document flow, prevents overlap */}
-                    {shouldLeftJustify && (
+                    {!inTauri && shouldLeftJustify && (
                         <View style={styles.titleContainerLeft}>
                             {titleContent}
                         </View>
                     )}
 
-                    {/* Navigation icons */}
-                    <View style={styles.rightContainer}>
+                    {/* Navigation icons — opt out of Tauri drag so Pressables remain clickable */}
+                    <View
+                        style={styles.rightContainer}
+                        {...(inTauri ? { dataSet: { tauriDragRegion: 'false' } } : {})}
+                    >
                         <Pressable
                             onPress={() => router.push('/(app)/inbox')}
                             hitSlop={15}
                             style={styles.notificationButton}
                         >
                             <Image
-                                source={require('@/assets/images/brutalist/Brutalism 27.png')}
+                                source={require('@/assets/images/brutalist/Brutalism-27.png')}
                                 contentFit="contain"
                                 style={[{ width: 32, height: 32 }]}
                                 tintColor={theme.colors.header.tint}
@@ -264,7 +275,7 @@ export const SidebarView = React.memo(() => {
                             hitSlop={15}
                         >
                             <Image
-                                source={require('@/assets/images/brutalist/Brutalism 9.png')}
+                                source={require('@/assets/images/brutalist/Brutalism-9.png')}
                                 contentFit="contain"
                                 style={[{ width: 32, height: 32 }]}
                                 tintColor={theme.colors.header.tint}
@@ -278,8 +289,7 @@ export const SidebarView = React.memo(() => {
                         </Pressable>
                     </View>
 
-                    {/* Centered title - absolute positioned over full header */}
-                    {!shouldLeftJustify && (
+                    {!inTauri && !shouldLeftJustify && (
                         <View style={styles.titleContainer}>
                             {titleContent}
                         </View>

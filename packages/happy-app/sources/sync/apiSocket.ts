@@ -1,6 +1,18 @@
 import { io, Socket } from 'socket.io-client';
+import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { Encryption } from './encryption/encryption';
+import { storage } from './storage';
+
+export function getHappyClientId(): string {
+    let platform: string = Platform.OS; // 'ios' | 'android' | 'web'
+    if (platform === 'web' && typeof window !== 'undefined' && '__TAURI__' in window) {
+        platform = 'desktop';
+    }
+    const version = Constants.expoConfig?.version || '0.0.0';
+    return `${platform}/${version}`;
+}
 
 //
 // Types
@@ -61,7 +73,8 @@ class ApiSocket {
             path: '/v1/updates',
             auth: {
                 token: this.config.token,
-                clientType: 'user-scoped' as const
+                clientType: 'user-scoped' as const,
+                happyClient: getHappyClientId()
             },
             transports: ['websocket'],
             reconnection: true,
@@ -179,6 +192,7 @@ class ApiSocket {
         const url = `${this.config.endpoint}${path}`;
         const headers = {
             'Authorization': `Bearer ${credentials.token}`,
+            'X-Happy-Client': getHappyClientId(),
             ...options?.headers
         };
 
@@ -207,6 +221,14 @@ class ApiSocket {
     // Private Methods
     //
 
+    private isVerboseLogging(): boolean {
+        try {
+            return storage.getState().localSettings.verboseLogging;
+        } catch {
+            return false;
+        }
+    }
+
     private updateStatus(status: 'disconnected' | 'connecting' | 'connected' | 'error') {
         if (this.currentStatus !== status) {
             this.currentStatus = status;
@@ -219,8 +241,10 @@ class ApiSocket {
 
         // Connection events
         this.socket.on('connect', () => {
-            // console.log('🔌 SyncSocket: Connected, recovered: ' + this.socket?.recovered);
-            // console.log('🔌 SyncSocket: Socket ID:', this.socket?.id);
+            if (this.isVerboseLogging()) {
+                console.log('🔌 SyncSocket: Connected, recovered: ' + this.socket?.recovered);
+                console.log('🔌 SyncSocket: Socket ID:', this.socket?.id);
+            }
             this.updateStatus('connected');
             if (!this.socket?.recovered) {
                 this.reconnectedListeners.forEach(listener => listener());
@@ -228,30 +252,35 @@ class ApiSocket {
         });
 
         this.socket.on('disconnect', (reason) => {
-            // console.log('🔌 SyncSocket: Disconnected', reason);
+            if (this.isVerboseLogging()) {
+                console.log('🔌 SyncSocket: Disconnected', reason);
+            }
             this.updateStatus('disconnected');
         });
 
         // Error events
         this.socket.on('connect_error', (error) => {
-            // console.error('🔌 SyncSocket: Connection error', error);
+            if (this.isVerboseLogging()) {
+                console.error('🔌 SyncSocket: Connection error', error);
+            }
             this.updateStatus('error');
         });
 
         this.socket.on('error', (error) => {
-            // console.error('🔌 SyncSocket: Error', error);
+            if (this.isVerboseLogging()) {
+                console.error('🔌 SyncSocket: Error', error);
+            }
             this.updateStatus('error');
         });
 
         // Message handling
         this.socket.onAny((event, data) => {
-            // console.log(`📥 SyncSocket: Received event '${event}':`, JSON.stringify(data).substring(0, 200));
+            if (this.isVerboseLogging()) {
+                console.log(`📥 SyncSocket: Received event '${event}':`, JSON.stringify(data).substring(0, 200));
+            }
             const handler = this.messageHandlers.get(event);
             if (handler) {
-                // console.log(`📥 SyncSocket: Calling handler for '${event}'`);
                 handler(data);
-            } else {
-                // console.log(`📥 SyncSocket: No handler registered for '${event}'`);
             }
         });
     }

@@ -24,6 +24,8 @@ export async function authLogin(config: Config): Promise<void> {
     try {
         await axios.post(`${config.serverUrl}/v1/auth/account/request`, {
             publicKey: publicKeyBase64,
+        }, {
+            headers: { 'X-Happy-Client': 'cli-control-plane/0.1.0' },
         });
     } catch (err) {
         if (err instanceof AxiosError) {
@@ -41,6 +43,8 @@ export async function authLogin(config: Config): Promise<void> {
     console.log('## Authentication');
     console.log('- Action: Scan this QR code with the Happy app');
     console.log('- Path: Settings -> Account -> Link New Device');
+    console.log(`- Public Key: \`${publicKeyBase64}\``);
+    console.log(`- URL: \`${qrData}\``);
     console.log('');
 
     // 4. Poll until authorized or timeout
@@ -52,6 +56,8 @@ export async function authLogin(config: Config): Promise<void> {
         try {
             const resp = await axios.post(`${config.serverUrl}/v1/auth/account/request`, {
                 publicKey: publicKeyBase64,
+            }, {
+                headers: { 'X-Happy-Client': 'cli-control-plane/0.1.0' },
             });
             result = resp.data as AuthRequestResponse;
         } catch (err) {

@@ -1,39 +1,52 @@
 import { AgentContentView } from '@/components/AgentContentView';
 import { AgentInput } from '@/components/AgentInput';
+import { layout } from '@/components/layout';
 import {
     getAvailableModels,
     getAvailablePermissionModes,
     getDefaultModelKey,
     getDefaultPermissionModeKey,
+    getEffortLevelsForModel,
+    getDefaultEffortKeyForModel,
     resolveCurrentOption,
+    EffortLevel,
 } from '@/components/modelModeOptions';
 import { getSuggestions } from '@/components/autocomplete/suggestions';
 import { ChatHeaderView } from '@/components/ChatHeaderView';
 import { ChatList } from '@/components/ChatList';
 import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
+import { SessionActionsAnchor, SessionActionsPopover } from '@/components/SessionActionsPopover';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
-import { startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
+import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useLocalSettingMutable, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
-import { tracking, trackMessageSent } from '@/track';
+import { tracking } from '@/track';
+import { getVoiceMessageCount, getVoiceOnboardingPromptLoadCount } from '@/sync/persistence';
 import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
-import { formatPathRelativeToHome, getSessionAvatarId, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
+import { FilesSidebar } from '@/components/FilesSidebar';
+import { InlineFileDiff } from '@/components/InlineFileDiff';
+import { prefetchPierreDiff } from '@/components/diff/PierreDiffView';
+import { GitFileStatus } from '@/sync/gitStatusFiles';
+import { formatPathRelativeToHome, getResumeCommandBlock, getSessionAvatarId, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
+import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
+import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import * as React from 'react';
 import { useMemo } from 'react';
-import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, Text, View, useWindowDimensions } from 'react-native';
+import Animated, { useSharedValue, useAnimatedStyle, withTiming, Easing } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
@@ -50,11 +63,57 @@ export const SessionView = React.memo((props: { id: string }) => {
     const headerHeight = useHeaderHeight();
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
+    const { width: windowWidth } = useWindowDimensions();
+    const [sessionActionsAnchor, setSessionActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
+    const fileDiffsSidebarEnabled = useSetting('fileDiffsSidebar');
+
+    const showSidebar = fileDiffsSidebarEnabled
+        && (isRunningOnMac() || Platform.OS === 'web')
+        && windowWidth >= SIDEBAR_MIN_WINDOW_WIDTH
+        && isDataReady && !!session;
+
+    // Match left sidebar width: 30% of window, clamped to 250–360px
+    const sidebarWidth = Math.min(Math.max(Math.floor(windowWidth * 0.3), 250), 360);
+
+    const [sidebarCollapsed, setSidebarCollapsed] = useLocalSettingMutable('sidebarCollapsed');
+    const sidebarAnim = useSharedValue(sidebarCollapsed ? 0 : 1);
+
+    React.useEffect(() => {
+        sidebarAnim.value = withTiming(sidebarCollapsed ? 0 : 1, {
+            duration: 250,
+            easing: Easing.out(Easing.cubic),
+        });
+    }, [sidebarCollapsed]);
+
+    const animatedSidebarStyle = useAnimatedStyle(() => ({
+        width: sidebarAnim.value * sidebarWidth,
+        opacity: sidebarAnim.value,
+        overflow: 'hidden' as const,
+    }));
+
+    const toggleSidebar = React.useCallback(() => {
+        setSidebarCollapsed(!sidebarCollapsed);
+    }, [sidebarCollapsed, setSidebarCollapsed]);
+
+    const [selectedFile, setSelectedFile] = React.useState<GitFileStatus | null>(null);
+    const handleSidebarFilePress = React.useCallback((file: GitFileStatus) => {
+        setSelectedFile((current) => (current?.fullPath === file.fullPath ? null : file));
+    }, []);
+    const clearSelectedFile = React.useCallback(() => setSelectedFile(null), []);
+
+    // When sidebar is hidden or disabled, don't keep a stale selection.
+    React.useEffect(() => {
+        if (!showSidebar || sidebarCollapsed) setSelectedFile(null);
+    }, [showSidebar, sidebarCollapsed]);
+
+    // Warm Pierre's lazy web chunks while the user is still reading chat.
+    React.useEffect(() => {
+        prefetchPierreDiff();
+    }, []);
 
     // Compute header props based on session state
     const headerProps = useMemo(() => {
         if (!isDataReady) {
-            // Loading state - show empty header
             return {
                 title: '',
                 subtitle: undefined,
@@ -66,7 +125,6 @@ export const SessionView = React.memo((props: { id: string }) => {
         }
 
         if (!session) {
-            // Deleted state - show deleted message in header
             return {
                 title: t('errors.sessionDeleted'),
                 subtitle: undefined,
@@ -77,7 +135,6 @@ export const SessionView = React.memo((props: { id: string }) => {
             };
         }
 
-        // Normal state - show session info
         const isConnected = session.presence === 'online';
         return {
             title: getSessionName(session),
@@ -90,7 +147,7 @@ export const SessionView = React.memo((props: { id: string }) => {
         };
     }, [session, isDataReady, sessionId, router]);
 
-    return (
+    const mainContent = (
         <>
             {/* Status bar shadow for landscape mode */}
             {isLandscape && deviceType === 'phone' && (
@@ -124,7 +181,28 @@ export const SessionView = React.memo((props: { id: string }) => {
                 }}>
                     <ChatHeaderView
                         {...headerProps}
-                        onBackPress={() => router.back()}
+                        onBackPress={() => {
+                            // If a sidebar file is currently shown inline, first
+                            // close the diff; only leave the session on the next press.
+                            if (selectedFile) {
+                                setSelectedFile(null);
+                                return;
+                            }
+                            router.back();
+                        }}
+                        avatarMenuExpanded={Platform.OS === 'web' && !!sessionActionsAnchor}
+                        avatarMenuSession={session}
+                        onAfterAvatarArchive={() => {
+                            setSessionActionsAnchor(null);
+                            router.replace('/');
+                        }}
+                        onAfterAvatarDelete={() => {
+                            setSessionActionsAnchor(null);
+                            router.replace('/');
+                        }}
+                        onAvatarMenuRequest={Platform.OS === 'web' && session ? setSessionActionsAnchor : undefined}
+                        onSidebarTogglePress={showSidebar ? toggleSidebar : undefined}
+                        sidebarCollapsed={sidebarCollapsed}
                     />
                     {/* Voice status bar below header - not on tablet (shown in sidebar) */}
                     {!isTablet && realtimeStatus !== 'disconnected' && (
@@ -134,28 +212,86 @@ export const SessionView = React.memo((props: { id: string }) => {
             )}
 
             {/* Content based on state */}
-            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 48 : 0) : 0 }}>
+            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 32 : 0) : 0 }}>
                 {!isDataReady ? (
-                    // Loading state
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                         <ActivityIndicator size="small" color={theme.colors.textSecondary} />
                     </View>
                 ) : !session ? (
-                    // Deleted state
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                         <Ionicons name="trash-outline" size={48} color={theme.colors.textSecondary} />
                         <Text style={{ color: theme.colors.text, fontSize: 20, marginTop: 16, fontWeight: '600' }}>{t('errors.sessionDeleted')}</Text>
                         <Text style={{ color: theme.colors.textSecondary, fontSize: 15, marginTop: 8, textAlign: 'center', paddingHorizontal: 32 }}>{t('errors.sessionDeletedDescription')}</Text>
                     </View>
                 ) : (
-                    // Normal session view
                     <SessionViewLoaded key={sessionId} sessionId={sessionId} session={session} />
                 )}
             </View>
+            {Platform.OS === 'web' && session && (
+                <SessionActionsPopover
+                    anchor={sessionActionsAnchor}
+                    onAfterArchive={() => {
+                        setSessionActionsAnchor(null);
+                        router.replace('/');
+                    }}
+                    onAfterDelete={() => {
+                        setSessionActionsAnchor(null);
+                        router.replace('/');
+                    }}
+                    onClose={() => setSessionActionsAnchor(null)}
+                    sessionId={session.id}
+                    visible={!!sessionActionsAnchor}
+                />
+            )}
         </>
+    );
+
+    if (!showSidebar) {
+        return mainContent;
+    }
+
+    // Desktop layout: chat + sidebar at the same level (full height).
+    // When a sidebar file is selected, InlineFileDiff overlays the main content
+    // (chat stays mounted underneath so state is preserved).
+    return (
+        <View style={{ flex: 1, flexDirection: 'row' }}>
+            <View style={{ flex: 1 }}>
+                {mainContent}
+                {selectedFile && !sidebarCollapsed && (
+                    <View
+                        pointerEvents="box-none"
+                        style={{
+                            position: 'absolute',
+                            top: safeArea.top + headerHeight,
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            backgroundColor: theme.colors.surface,
+                        }}
+                    >
+                        <InlineFileDiff
+                            sessionId={sessionId}
+                            fullPath={selectedFile.fullPath}
+                            status={selectedFile.status}
+                            onClose={clearSelectedFile}
+                        />
+                    </View>
+                )}
+            </View>
+            <Animated.View style={[{ minWidth: 0, alignSelf: 'stretch' }, animatedSidebarStyle]}>
+                <View style={{ width: sidebarWidth, flex: 1 }}>
+                    <FilesSidebar
+                        sessionId={sessionId}
+                        selectedPath={selectedFile?.fullPath ?? null}
+                        onFilePress={handleSidebarFilePress}
+                    />
+                </View>
+            </Animated.View>
+        </View>
     );
 });
 
+const SIDEBAR_MIN_WINDOW_WIDTH = 1100;
 
 function SessionViewLoaded({ sessionId, session }: { sessionId: string, session: Session }) {
     const { theme } = useUnistyles();
@@ -163,10 +299,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const safeArea = useSafeAreaInsets();
     const isLandscape = useIsLandscape();
     const deviceType = useDeviceType();
+    const isTablet = useIsTablet();
     const [message, setMessage] = React.useState('');
     const realtimeStatus = useRealtimeStatus();
     const { messages, isLoaded } = useSessionMessages(sessionId);
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
+    const sessionInputHorizontalPadding = Platform.OS === 'web' || isRunningOnMac() || isTablet ? 12 : 8;
 
     // Check if CLI version is outdated and not already acknowledged
     const cliVersion = session.metadata?.version;
@@ -197,10 +335,29 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             getDefaultModelKey(flavor),
         ])
     ), [availableModels, session.modelMode, session.metadata?.currentModelCode, flavor]);
+
+    // Effort level state
+    const modelKey = modelMode?.key ?? 'default';
+    const availableEffortLevels = React.useMemo<EffortLevel[]>(() => (
+        getEffortLevelsForModel(flavor, modelKey)
+    ), [flavor, modelKey]);
+    const effortLevel = React.useMemo<EffortLevel | null>(() => (
+        resolveCurrentOption(availableEffortLevels, [
+            session.effortLevel,
+            getDefaultEffortKeyForModel(flavor, modelKey),
+        ])
+    ), [availableEffortLevels, session.effortLevel, flavor, modelKey]);
+
     const sessionStatus = useSessionStatus(session);
     const sessionUsage = useSessionUsage(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const experiments = useSetting('experiments');
+    const expResumeSession = useSetting('expResumeSession');
+    const { canResume, resumeSession, resumingSession } = useSessionQuickActions(session);
+    const isArchivedSession = session.metadata?.lifecycleState === 'archived';
+    const isDisconnected = !sessionStatus.isConnected;
+    const isInactiveArchivedSession = isArchivedSession && isDisconnected;
+    const resumeCommandBlock = getResumeCommandBlock(session);
 
     // Use draft hook for auto-saving message drafts
     const { clearDraft } = useDraft(sessionId, message, setMessage);
@@ -226,6 +383,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         storage.getState().updateSessionModelMode(sessionId, mode.key);
     }, [sessionId]);
 
+    const updateEffortLevel = React.useCallback((level: EffortLevel) => {
+        storage.getState().updateSessionEffortLevel(sessionId, level.key);
+    }, [sessionId]);
+
     // Memoize header-dependent styles to prevent re-renders
     const headerDependentStyles = React.useMemo(() => ({
         contentContainer: {
@@ -245,16 +406,35 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         if (realtimeStatus === 'disconnected' || realtimeStatus === 'error') {
             try {
                 const initialPrompt = voiceHooks.onVoiceStarted(sessionId);
-                await startRealtimeSession(sessionId, initialPrompt);
-                tracking?.capture('voice_session_started', { sessionId });
+                const conversationId = await startRealtimeSession(sessionId, initialPrompt);
+                if (conversationId) {
+                    const hasPro = storage.getState().purchases.entitlements['pro'] ?? false;
+                    tracking?.capture('voice_session_started', {
+                        session_id: sessionId,
+                        elevenlabs_conversation_id: conversationId,
+                        has_pro: hasPro,
+                        onboarding_prompt_load_count: getVoiceOnboardingPromptLoadCount(),
+                        voice_message_count: getVoiceMessageCount(),
+                    });
+                }
             } catch (error) {
                 console.error('Failed to start realtime session:', error);
                 Modal.alert(t('common.error'), t('errors.voiceSessionFailed'));
-                tracking?.capture('voice_session_error', { error: error instanceof Error ? error.message : 'Unknown error' });
+                tracking?.capture('voice_session_error', {
+                    session_id: sessionId,
+                    elevenlabs_conversation_id: getCurrentVoiceConversationId(),
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                });
             }
         } else if (realtimeStatus === 'connected') {
+            const conversationId = getCurrentVoiceConversationId();
+            const durationSeconds = getCurrentVoiceSessionDurationSeconds();
             await stopRealtimeSession();
-            tracking?.capture('voice_session_stopped');
+            tracking?.capture('voice_session_stopped', {
+                session_id: sessionId,
+                elevenlabs_conversation_id: conversationId,
+                ...(durationSeconds !== undefined ? { duration_seconds: durationSeconds } : {}),
+            });
 
             // Notify voice assistant about voice session stop
             voiceHooks.onVoiceStopped();
@@ -297,7 +477,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         </>
     ) : null;
 
-    const input = (
+    const composer = (
         <AgentInput
             placeholder={t('session.inputPlaceholder')}
             value={message}
@@ -309,6 +489,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             modelMode={modelMode}
             availableModels={availableModels}
             onModelModeChange={updateModelMode}
+            effortLevel={effortLevel}
+            availableEffortLevels={availableEffortLevels}
+            onEffortLevelChange={updateEffortLevel}
             metadata={session.metadata}
             connectionStatus={{
                 text: sessionStatus.statusText,
@@ -316,20 +499,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 dotColor: sessionStatus.statusDotColor,
                 isPulsing: sessionStatus.isPulsing
             }}
+            blockSend={false}
             onSend={() => {
                 if (message.trim()) {
                     setMessage('');
                     clearDraft();
-                    sync.sendMessage(sessionId, message);
-                    trackMessageSent();
+                    sync.sendMessage(sessionId, message, { source: 'chat' });
                 }
             }}
-            onMicPress={micButtonState.onMicPress}
-            isMicActive={micButtonState.isMicActive}
-            onAbort={() => sessionAbort(sessionId)}
+            onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
+            isMicActive={isDisconnected ? false : micButtonState.isMicActive}
+            onAbort={isDisconnected ? undefined : () => sessionAbort(sessionId)}
             showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
             onFileViewerPress={experiments ? () => router.push(`/session/${sessionId}/files`) : undefined}
-            // Autocomplete configuration
             autocompletePrefixes={['@', '/']}
             autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
             usageData={sessionUsage ? {
@@ -347,6 +529,33 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             } : undefined}
             alwaysShowContextSize={alwaysShowContextSize}
         />
+    );
+
+    const archivedHint = isInactiveArchivedSession ? (
+        <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+            <InactiveArchivedHint
+                resumeCommandBlock={expResumeSession ? resumeCommandBlock : null}
+                canResume={canResume}
+                resuming={resumingSession}
+                onResume={resumeSession}
+            />
+        </CenteredInputWidth>
+    ) : null;
+
+    const input = isInactiveArchivedSession ? (
+        <>
+            {archivedHint}
+            {composer}
+        </>
+    ) : (
+        <>
+            {expResumeSession && isDisconnected && resumeCommandBlock && (
+                <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+                    <ResumeCommandHint resumeCommandBlock={resumeCommandBlock} />
+                </CenteredInputWidth>
+            )}
+            {composer}
+        </>
     );
 
 
@@ -387,7 +596,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             )}
 
             {/* Main content area - no padding since header is overlay */}
-            <View style={{ flexBasis: 0, flexGrow: 1, paddingBottom: safeArea.bottom + ((isRunningOnMac() || Platform.OS === 'web') ? 32 : 0) }}>
+            <View style={{ flexBasis: 0, flexGrow: 1, paddingBottom: safeArea.bottom + ((isRunningOnMac() || Platform.OS === 'web') ? 8 : 0) }}>
                 <AgentContentView
                     content={content}
                     input={input}
@@ -434,4 +643,154 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             }
         </>
     )
+}
+
+function ResumeCommandHint({ resumeCommandBlock }: {
+    resumeCommandBlock: NonNullable<ReturnType<typeof getResumeCommandBlock>>;
+}) {
+    const { theme } = useUnistyles();
+
+    return (
+        <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10, gap: 8 }}>
+            <ResumeCommandCopyBlock resumeCommandBlock={resumeCommandBlock} />
+            <Text style={{
+                color: theme.colors.textSecondary,
+                fontSize: 12,
+                lineHeight: 16,
+                textAlign: 'center',
+                paddingHorizontal: 8,
+            }}>
+                Run this command in your terminal to resume this session
+            </Text>
+        </View>
+    );
+}
+
+function InactiveArchivedHint(props: {
+    resumeCommandBlock: NonNullable<ReturnType<typeof getResumeCommandBlock>> | null;
+    canResume: boolean;
+    resuming: boolean;
+    onResume: () => void;
+}) {
+    const { theme } = useUnistyles();
+    const hintTextStyle = {
+        color: theme.colors.agentEventText,
+        fontSize: 13,
+        lineHeight: 18,
+        textAlign: 'left' as const,
+    };
+
+    return (
+        <View style={{
+            paddingTop: 12,
+            paddingBottom: 10,
+            gap: 10,
+            alignItems: 'stretch',
+        }}>
+            <View style={{ paddingHorizontal: 8, gap: 4 }}>
+                <Text style={hintTextStyle}>
+                    {t('session.inactiveArchived')}
+                </Text>
+                {props.canResume ? null : props.resumeCommandBlock && (
+                    <Text style={hintTextStyle}>
+                        {t('session.resumeFromTerminal')}
+                    </Text>
+                )}
+            </View>
+            {props.canResume ? (
+                <Pressable
+                    onPress={props.onResume}
+                    disabled={props.resuming}
+                    style={({ pressed }) => ({
+                        height: 40,
+                        borderRadius: 10,
+                        backgroundColor: theme.colors.button.primary.background,
+                        opacity: props.resuming ? 0.6 : pressed ? 0.8 : 1,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginHorizontal: 8,
+                    })}
+                >
+                    {props.resuming ? (
+                        <ActivityIndicator size="small" color={theme.colors.button.primary.tint} />
+                    ) : (
+                        <Text style={{ color: theme.colors.button.primary.tint, fontSize: 15, fontWeight: '600' }}>
+                            {t('sessionInfo.resumeSession')}
+                        </Text>
+                    )}
+                </Pressable>
+            ) : props.resumeCommandBlock && (
+                <ResumeCommandCopyBlock resumeCommandBlock={props.resumeCommandBlock} />
+            )}
+        </View>
+    );
+}
+
+function ResumeCommandCopyBlock({ resumeCommandBlock }: {
+    resumeCommandBlock: NonNullable<ReturnType<typeof getResumeCommandBlock>>;
+}) {
+    const { theme } = useUnistyles();
+    const [copied, setCopied] = React.useState(false);
+
+    return (
+        <Pressable
+            onPress={async () => {
+                await Clipboard.setStringAsync(resumeCommandBlock.copyText);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+            }}
+            style={{
+                minHeight: 48,
+                borderRadius: 14,
+                backgroundColor: theme.colors.surfaceHigh,
+                flexDirection: 'row',
+                gap: 8,
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                alignItems: 'flex-start',
+            }}
+        >
+            <View style={{ flex: 1 }}>
+                {resumeCommandBlock.lines.map((line, index) => (
+                    <Text
+                        key={`${line}-${index}`}
+                        style={{
+                            color: theme.colors.text,
+                            fontSize: 13,
+                            lineHeight: 18,
+                            fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                        }}
+                    >
+                        {line}
+                    </Text>
+                ))}
+            </View>
+            <Ionicons
+                name={copied ? 'checkmark' : 'copy-outline'}
+                size={16}
+                color={copied ? '#30D158' : theme.colors.textSecondary}
+                style={{ marginTop: 1 }}
+            />
+        </Pressable>
+    );
+}
+
+function CenteredInputWidth(props: {
+    children: React.ReactNode;
+    horizontalPadding: number;
+}) {
+    return (
+        <View style={{
+            width: '100%',
+            paddingHorizontal: props.horizontalPadding,
+            alignItems: 'center',
+        }}>
+            <View style={{
+                width: '100%',
+                maxWidth: layout.maxWidth,
+            }}>
+                {props.children}
+            </View>
+        </View>
+    );
 }

@@ -8,7 +8,8 @@ import { z } from 'zod';
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
 import { logger } from '@/ui/logger';
 import { Metadata } from '@/api/types';
-import { TrackedSession } from './types';
+import { decodeBase64 } from '@/api/encryption';
+import { TrackedSession, SessionEncryptionData } from './types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
 
 export function startDaemonControlServer({
@@ -22,7 +23,7 @@ export function startDaemonControlServer({
   stopSession: (sessionId: string) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   requestShutdown: () => void;
-  onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
+  onHappySessionWebhook: (sessionId: string, metadata: Metadata, encryption?: SessionEncryptionData) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -39,7 +40,14 @@ export function startDaemonControlServer({
       schema: {
         body: z.object({
           sessionId: z.string(),
-          metadata: z.any() // Metadata type from API
+          metadata: z.any(),
+          encryption: z.object({
+            encryptionKey: z.string(),
+            encryptionVariant: z.enum(['legacy', 'dataKey']),
+            seq: z.number(),
+            metadataVersion: z.number(),
+            agentStateVersion: z.number(),
+          }).optional()
         }),
         response: {
           200: z.object({
@@ -48,10 +56,22 @@ export function startDaemonControlServer({
         }
       }
     }, async (request) => {
-      const { sessionId, metadata } = request.body;
+      const { sessionId, metadata, encryption } = request.body;
 
       logger.debug(`[CONTROL SERVER] Session started: ${sessionId}`);
-      onHappySessionWebhook(sessionId, metadata);
+
+      let encryptionData: SessionEncryptionData | undefined;
+      if (encryption) {
+        encryptionData = {
+          encryptionKey: decodeBase64(encryption.encryptionKey),
+          encryptionVariant: encryption.encryptionVariant,
+          seq: encryption.seq,
+          metadataVersion: encryption.metadataVersion,
+          agentStateVersion: encryption.agentStateVersion,
+        };
+      }
+
+      onHappySessionWebhook(sessionId, metadata, encryptionData);
 
       return { status: 'ok' as const };
     });
@@ -108,7 +128,9 @@ export function startDaemonControlServer({
       schema: {
         body: z.object({
           directory: z.string(),
-          sessionId: z.string().optional()
+          sessionId: z.string().optional(),
+          agent: z.enum(['claude', 'codex', 'gemini', 'openclaw']).optional(),
+          environmentVariables: z.record(z.string(), z.string()).optional(),
         }),
         response: {
           200: z.object({
@@ -129,10 +151,10 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId } = request.body;
+      const { directory, sessionId, agent, environmentVariables } = request.body;
 
-      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}`);
-      const result = await spawnSession({ directory, sessionId });
+      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent || 'default'}`);
+      const result = await spawnSession({ directory, sessionId, agent, environmentVariables });
 
       switch (result.type) {
         case 'success':

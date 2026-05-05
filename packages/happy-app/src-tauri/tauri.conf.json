@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:8081",
-    "beforeDevCommand": "yarn start",
-    "beforeBuildCommand": "yarn expo export --platform web --output-dir dist"
+    "beforeDevCommand": "pnpm start",
+    "beforeBuildCommand": "pnpm exec expo export --platform web --output-dir dist"
   },
   "app": {
     "windows": [
@@ -16,7 +16,9 @@
         "width": 800,
         "height": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

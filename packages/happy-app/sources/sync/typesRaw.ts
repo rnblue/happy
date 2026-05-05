@@ -17,15 +17,6 @@ const usageDataSchema = z.object({
 
 export type UsageData = z.infer<typeof usageDataSchema>;
 
-function isSessionProtocolSendEnabled(): boolean {
-    const raw = (
-        process.env.EXPO_PUBLIC_ENABLE_SESSION_PROTOCOL_SEND
-        ?? process.env.ENABLE_SESSION_PROTOCOL_SEND
-        ?? ''
-    ).toLowerCase();
-    return raw === '1' || raw === 'true' || raw === 'yes';
-}
-
 const agentEventSchema = z.discriminatedUnion('type', [z.object({
     type: z.literal('switch'),
     mode: z.enum(['local', 'remote'])
@@ -276,7 +267,7 @@ const rawAgentRecordSchema = z.discriminatedUnion('type', [z.object({
     type: z.literal('output'),
     data: z.intersection(z.discriminatedUnion('type', [
         z.object({ type: z.literal('system') }),
-        z.object({ type: z.literal('result') }),
+        z.object({ type: z.literal('result'), result: z.string().nullish(), subtype: z.string().nullish(), is_error: z.boolean().nullish() }),
         z.object({ type: z.literal('summary'), summary: z.string() }),
         z.object({ type: z.literal('assistant'), message: z.object({ role: z.literal('assistant'), model: z.string(), content: z.array(rawAgentContentSchema), usage: usageDataSchema.optional() }), parent_tool_use_id: z.string().nullable().optional() }),
         z.object({ type: z.literal('user'), message: z.object({ role: z.literal('user'), content: z.union([z.string(), z.array(rawAgentContentSchema)]) }), parent_tool_use_id: z.string().nullable().optional(), toolUseResult: z.any().nullable().optional() }),
@@ -592,10 +583,6 @@ function normalizeSessionEnvelope(
 
     if (envelope.ev.t === 'text') {
         if (envelope.role === 'user') {
-            if (!isSessionProtocolSendEnabled()) {
-                return null;
-            }
-
             return {
                 id: messageId,
                 localId,
@@ -716,18 +703,13 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
     // Zod transform handles normalization during validation
     let parsed = rawRecordSchema.safeParse(raw);
     if (!parsed.success) {
-        console.error('=== VALIDATION ERROR ===');
-        console.error('Zod issues:', JSON.stringify(parsed.error.issues, null, 2));
-        console.error('Raw message:', JSON.stringify(raw, null, 2));
-        console.error('=== END ERROR ===');
+        const rawObj = raw as any;
+        const msgType = rawObj?.content?.data?.type ?? rawObj?.content?.type ?? 'unknown';
+        console.warn(`Unrecognized message type: ${msgType} (id: ${id})`);
         return null;
     }
     raw = parsed.data;
     if (raw.role === 'user') {
-        if (isSessionProtocolSendEnabled()) {
-            return null;
-        }
-
         return {
             id,
             localId,
@@ -756,6 +738,28 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
 
             // Skip compact summary messages
             if (raw.content.data.isCompactSummary) {
+                return null;
+            }
+
+            // Handle Result messages (e.g. slash command errors like "Unknown skill: mcp")
+            if (raw.content.data.type === 'result') {
+                const resultText = raw.content.data.result;
+                if (resultText) {
+                    return {
+                        id,
+                        localId,
+                        createdAt,
+                        role: 'agent',
+                        content: [{
+                            type: 'text' as const,
+                            text: resultText,
+                            uuid: raw.content.data.uuid ?? id,
+                            parentUUID: raw.content.data.parentUuid ?? null,
+                        }],
+                        isSidechain: false,
+                        meta: raw.meta,
+                    } satisfies NormalizedMessage;
+                }
                 return null;
             }
 
@@ -854,7 +858,7 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                             content.push({
                                 ...c,  // WOLOG: Preserve all fields including unknown ones
                                 type: 'tool-result',
-                                content: raw.content.data.toolUseResult ? raw.content.data.toolUseResult : (typeof c.content === 'string' ? c.content : c.content[0].text),
+                                content: raw.content.data.toolUseResult ? raw.content.data.toolUseResult : (typeof c.content === 'string' ? c.content : c.content?.[0]?.text ?? ''),
                                 is_error: c.is_error || false,
                                 uuid: raw.content.data.uuid,
                                 parentUUID: raw.content.data.parentUuid ?? null,

@@ -1,16 +1,27 @@
 import { create } from "zustand";
 import { useShallow } from 'zustand/react/shallow'
+import equal from 'fast-deep-equal'
+
+function useDeepEqual<T>(selector: (state: StorageState) => T): (state: StorageState) => T {
+    const prev = React.useRef<T>(undefined);
+    return (state: StorageState) => {
+        const next = selector(state);
+        return equal(prev.current, next) ? prev.current! : (prev.current = next);
+    };
+}
 import { Session, Machine, GitStatus } from "./storageTypes";
+import type { GitStatusFiles } from "./gitStatusFiles";
 import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
+import { getSessionName, getSessionSubtitle, getSessionAvatarId, type SessionState } from '@/utils/sessionUtils';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionEffortLevels, saveSessionEffortLevels } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -59,12 +70,67 @@ interface SessionMessages {
 
 // Machine type is now imported from storageTypes - represents persisted machine data
 
+// Display-only row data — all primitives, cheap to deep-equal
+export interface SessionRowData {
+    id: string;
+    name: string;
+    subtitle: string;
+    avatarId: string;
+    flavor: string | null;
+    state: SessionState;
+    // Only present on inactive sessions — active sessions never show "last seen"
+    // and activeAt updates on every heartbeat, causing needless deep-equal diffs
+    activeAt?: number;
+    createdAt?: number;
+    hasDraft: boolean;
+    active: boolean;
+    machineId: string | null;
+    path: string | null;
+    homeDir: string | null;
+    completedTodosCount: number;
+    totalTodosCount: number;
+}
+
+function buildSessionRowData(session: Session): SessionRowData {
+    const isOnline = session.presence === "online";
+    const hasPermissions = !!(session.agentState?.requests && Object.keys(session.agentState.requests).length > 0);
+
+    let state: SessionState;
+    if (!isOnline) {
+        state = 'disconnected';
+    } else if (hasPermissions) {
+        state = 'permission_required';
+    } else if (session.thinking) {
+        state = 'thinking';
+    } else {
+        state = 'waiting';
+    }
+
+    return {
+        id: session.id,
+        name: getSessionName(session),
+        subtitle: getSessionSubtitle(session),
+        avatarId: getSessionAvatarId(session),
+        flavor: session.metadata?.flavor ?? null,
+        state,
+        ...(!session.active && { activeAt: session.activeAt, createdAt: session.createdAt }),
+        hasDraft: !!session.draft,
+        active: session.active,
+        machineId: session.metadata?.machineId ?? null,
+        path: session.metadata?.path ?? null,
+        homeDir: session.metadata?.homeDir ?? null,
+        completedTodosCount: session.todos?.filter(todo => todo.status === 'completed').length ?? 0,
+        totalTodosCount: session.todos?.length ?? 0,
+    };
+}
+
 // Unified list item type for SessionsList component
 export type SessionListViewItem =
     | { type: 'header'; title: string }
-    | { type: 'active-sessions'; sessions: Session[] }
+    | { type: 'active-sessions'; sessions: SessionRowData[] }
+    | { type: 'archive-toggle'; hidden: boolean }
     | { type: 'project-group'; displayPath: string; machine: Machine }
-    | { type: 'session'; session: Session; variant?: 'default' | 'no-path' };
+    | { type: 'session'; session: SessionRowData };
 
 // Legacy type for backward compatibility - to be removed
 export type SessionListItem = string | Session;
@@ -80,6 +146,8 @@ interface StorageState {
     sessionListViewData: SessionListViewItem[] | null;
     sessionMessages: Record<string, SessionMessages>;
     sessionGitStatus: Record<string, GitStatus | null>;
+    sessionGitStatusFiles: Record<string, GitStatusFiles | null>;
+    sessionFileCache: Record<string, Record<string, { content: string | null; diff: string | null; isBinary: boolean; cachedAt: number }>>;
     machines: Record<string, Machine>;
     artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
     friends: Record<string, UserProfile>;  // All relationships (friends, pending, requested, etc.)
@@ -91,7 +159,8 @@ interface StorageState {
     feedLoaded: boolean;  // True after initial feed fetch
     friendsLoaded: boolean;  // True after initial friends fetch
     realtimeStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
-    realtimeMode: 'idle' | 'speaking';
+    realtimeMode: 'idle' | 'agent-speaking' | 'user-speaking';
+    voiceSessionGeneration: number;
     socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     socketLastConnectedAt: number | null;
     socketLastDisconnectedAt: number | null;
@@ -99,6 +168,7 @@ interface StorageState {
     nativeUpdateStatus: { available: boolean; updateUrl?: string } | null;
     applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => void;
     applyMachines: (machines: Machine[], replace?: boolean) => void;
+    deleteMachine: (machineId: string) => void;
     applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
@@ -109,16 +179,20 @@ interface StorageState {
     applyPurchases: (customerInfo: CustomerInfo) => void;
     applyProfile: (profile: Profile) => void;
     applyGitStatus: (sessionId: string, status: GitStatus | null) => void;
+    applyGitStatusFiles: (sessionId: string, files: GitStatusFiles | null) => void;
+    applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => void;
     applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => void;
     isMutableToolCall: (sessionId: string, callId: string) => boolean;
     setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
-    setRealtimeMode: (mode: 'idle' | 'speaking', immediate?: boolean) => void;
+    setRealtimeMode: (mode: 'idle' | 'agent-speaking' | 'user-speaking', immediate?: boolean) => void;
     clearRealtimeModeDebounce: () => void;
+    incrementVoiceSessionGeneration: () => void;
     setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     getActiveSessions: () => Session[];
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
     updateSessionPermissionMode: (sessionId: string, mode: string) => void;
     updateSessionModelMode: (sessionId: string, mode: string) => void;
+    updateSessionEffortLevel: (sessionId: string, level: string) => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
@@ -164,16 +238,16 @@ function buildSessionListViewData(
         }
     });
 
-    // Sort sessions by updated date (newest first)
-    activeSessions.sort((a, b) => b.updatedAt - a.updatedAt);
-    inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    // Sort by creation date (newest first) — matches applySessions behavior
+    activeSessions.sort((a, b) => b.createdAt - a.createdAt);
+    inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
 
     // Build unified list view data
     const listData: SessionListViewItem[] = [];
 
     // Add active sessions as a single item at the top (if any)
     if (activeSessions.length > 0) {
-        listData.push({ type: 'active-sessions', sessions: activeSessions });
+        listData.push({ type: 'active-sessions', sessions: activeSessions.map(buildSessionRowData) });
     }
 
     // Group inactive sessions by date
@@ -185,7 +259,7 @@ function buildSessionListViewData(
     let currentDateString: string | null = null;
 
     for (const session of inactiveSessions) {
-        const sessionDate = new Date(session.updatedAt);
+        const sessionDate = new Date(session.createdAt);
         const dateString = sessionDate.toDateString();
 
         if (currentDateString !== dateString) {
@@ -207,7 +281,7 @@ function buildSessionListViewData(
 
                 listData.push({ type: 'header', title: headerTitle });
                 currentDateGroup.forEach(sess => {
-                    listData.push({ type: 'session', session: sess });
+                    listData.push({ type: 'session', session: buildSessionRowData(sess) });
                 });
             }
 
@@ -237,7 +311,7 @@ function buildSessionListViewData(
 
         listData.push({ type: 'header', title: headerTitle });
         currentDateGroup.forEach(sess => {
-            listData.push({ type: 'session', session: sess });
+            listData.push({ type: 'session', session: buildSessionRowData(sess) });
         });
     }
 
@@ -251,6 +325,8 @@ export const storage = create<StorageState>()((set, get) => {
     let profile = loadProfile();
     let sessionDrafts = loadSessionDrafts();
     let sessionPermissionModes = loadSessionPermissionModes();
+    let sessionModelModes = loadSessionModelModes();
+    let sessionEffortLevels = loadSessionEffortLevels();
     return {
         settings,
         settingsVersion: version,
@@ -272,8 +348,11 @@ export const storage = create<StorageState>()((set, get) => {
         sessionListViewData: null,
         sessionMessages: {},
         sessionGitStatus: {},
+        sessionGitStatusFiles: {},
+        sessionFileCache: {},
         realtimeStatus: 'disconnected',
         realtimeMode: 'idle',
+        voiceSessionGeneration: 0,
         socketStatus: 'disconnected',
         socketLastConnectedAt: null,
         socketLastDisconnectedAt: null,
@@ -300,8 +379,11 @@ export const storage = create<StorageState>()((set, get) => {
         },
         applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => set((state) => {
             // Load drafts and permission modes if sessions are empty (initial load)
-            const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
-            const savedPermissionModes = Object.keys(state.sessions).length === 0 ? sessionPermissionModes : {};
+            const isInitialLoad = Object.keys(state.sessions).length === 0;
+            const savedDrafts = isInitialLoad ? sessionDrafts : {};
+            const savedPermissionModes = isInitialLoad ? sessionPermissionModes : {};
+            const savedModelModes = isInitialLoad ? sessionModelModes : {};
+            const savedEffortLevels = isInitialLoad ? sessionEffortLevels : {};
 
             // Merge new sessions with existing ones
             const mergedSessions: Record<string, Session> = { ...state.sessions };
@@ -323,11 +405,20 @@ export const storage = create<StorageState>()((set, get) => {
                     (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
                     defaultPermissionMode;
 
+                // Restore model mode / effort level from MMKV on first load — server
+                // does not sync these, and they used to reset on every app restart (#1028).
+                const existingModelMode = state.sessions[session.id]?.modelMode;
+                const resolvedModelMode = existingModelMode ?? savedModelModes[session.id] ?? session.modelMode ?? null;
+                const existingEffortLevel = state.sessions[session.id]?.effortLevel;
+                const resolvedEffortLevel = existingEffortLevel ?? savedEffortLevels[session.id] ?? session.effortLevel ?? null;
+
                 mergedSessions[session.id] = {
                     ...session,
                     presence,
                     draft: existingDraft || savedDraft || session.draft || null,
-                    permissionMode: resolvedPermissionMode
+                    permissionMode: resolvedPermissionMode,
+                    modelMode: resolvedModelMode,
+                    effortLevel: resolvedEffortLevel,
                 };
             });
 
@@ -483,6 +574,27 @@ export const storage = create<StorageState>()((set, get) => {
         applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
             let changed = new Set<string>();
             let hasReadyEvent = false;
+
+            // Track plan mode transitions through the batch in order.
+            // Set true on EnterPlanMode, false on ExitPlanMode. The final value
+            // tells us whether the batch ends with an unresolved plan entry.
+            // This prevents history replays (which contain both Enter + Exit) from
+            // re-triggering plan mode, while still catching real-time EnterPlanMode.
+            let shouldEnterPlanMode = false;
+            for (const msg of messages) {
+                if (msg.role === 'agent') {
+                    for (const c of msg.content) {
+                        if (c.type === 'tool-call') {
+                            if (c.name === 'EnterPlanMode' || c.name === 'enter_plan_mode') {
+                                shouldEnterPlanMode = true;
+                            } else if (c.name === 'ExitPlanMode' || c.name === 'exit_plan_mode') {
+                                shouldEnterPlanMode = false;
+                            }
+                        }
+                    }
+                }
+            }
+
             set((state) => {
 
                 // Resolve session messages state
@@ -524,7 +636,7 @@ export const storage = create<StorageState>()((set, get) => {
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
                 // This ensures latestUsage is available immediately on load, even before messages are fully loaded
                 let updatedSessions = state.sessions;
-                const needsUpdate = (reducerResult.todos !== undefined || existingSession.reducerState.latestUsage) && session;
+                const needsUpdate = (reducerResult.todos !== undefined || existingSession.reducerState.latestUsage || shouldEnterPlanMode) && session;
 
                 if (needsUpdate) {
                     updatedSessions = {
@@ -535,7 +647,9 @@ export const storage = create<StorageState>()((set, get) => {
                             // Copy latestUsage from reducerState to make it immediately available
                             latestUsage: existingSession.reducerState.latestUsage ? {
                                 ...existingSession.reducerState.latestUsage
-                            } : session.latestUsage
+                            } : session.latestUsage,
+                            // Auto-switch to plan mode when EnterPlanMode tool call is detected
+                            ...(shouldEnterPlanMode && { permissionMode: 'plan' })
                         }
                     };
                 }
@@ -555,6 +669,18 @@ export const storage = create<StorageState>()((set, get) => {
                     }
                 };
             });
+
+            // Persist plan mode change
+            if (shouldEnterPlanMode) {
+                const allModes: Record<string, string> = {};
+                const currentState = get();
+                Object.entries(currentState.sessions).forEach(([id, sess]) => {
+                    if (sess.permissionMode && sess.permissionMode !== 'default') {
+                        allModes[id] = sess.permissionMode;
+                    }
+                });
+                saveSessionPermissionModes(allModes);
+            }
 
             return { changed: Array.from(changed), hasReadyEvent };
         },
@@ -685,6 +811,23 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             };
         }),
+        applyGitStatusFiles: (sessionId: string, files: GitStatusFiles | null) => set((state) => ({
+            ...state,
+            sessionGitStatusFiles: {
+                ...state.sessionGitStatusFiles,
+                [sessionId]: files
+            }
+        })),
+        applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => set((state) => ({
+            ...state,
+            sessionFileCache: {
+                ...state.sessionFileCache,
+                [sessionId]: {
+                    ...(state.sessionFileCache[sessionId] || {}),
+                    [filePath]: { content, diff, isBinary, cachedAt: Date.now() }
+                }
+            }
+        })),
         applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => set((state) => ({
             ...state,
             nativeUpdateStatus: status
@@ -693,7 +836,7 @@ export const storage = create<StorageState>()((set, get) => {
             ...state,
             realtimeStatus: status
         })),
-        setRealtimeMode: (mode: 'idle' | 'speaking', immediate?: boolean) => {
+        setRealtimeMode: (mode: 'idle' | 'agent-speaking' | 'user-speaking', immediate?: boolean) => {
             if (immediate) {
                 // Clear any pending debounce and set immediately
                 if (realtimeModeDebounceTimer) {
@@ -718,6 +861,10 @@ export const storage = create<StorageState>()((set, get) => {
                 realtimeModeDebounceTimer = null;
             }
         },
+        incrementVoiceSessionGeneration: () => set((state) => ({
+            ...state,
+            voiceSessionGeneration: state.voiceSessionGeneration + 1
+        })),
         setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => set((state) => {
             const now = Date.now();
             const updates: Partial<StorageState> = {
@@ -766,15 +913,10 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             };
 
-            // Rebuild sessionListViewData to update the UI immediately
-            const sessionListViewData = buildSessionListViewData(
-                updatedSessions
-            );
-
             return {
                 ...state,
                 sessions: updatedSessions,
-                sessionListViewData
+                sessionListViewData: buildSessionListViewData(updatedSessions)
             };
         }),
         updateSessionPermissionMode: (sessionId: string, mode: string) => set((state) => {
@@ -820,7 +962,43 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             };
 
+            // Persist model modes so the selection survives app restart (#1028).
+            // Only non-default values are kept — matches the permissionMode pattern above.
+            const allModes: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.modelMode && sess.modelMode !== 'default') {
+                    allModes[id] = sess.modelMode;
+                }
+            });
+            saveSessionModelModes(allModes);
+
             // No need to rebuild sessionListViewData since model mode doesn't affect the list display
+            return {
+                ...state,
+                sessions: updatedSessions
+            };
+        }),
+        updateSessionEffortLevel: (sessionId: string, level: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            const updatedSessions = {
+                ...state.sessions,
+                [sessionId]: {
+                    ...session,
+                    effortLevel: level
+                }
+            };
+
+            // Persist effort levels so the selection survives app restart (#1028).
+            const allLevels: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.effortLevel) {
+                    allLevels[id] = sess.effortLevel;
+                }
+            });
+            saveSessionEffortLevels(allLevels);
+
             return {
                 ...state,
                 sessions: updatedSessions
@@ -866,6 +1044,17 @@ export const storage = create<StorageState>()((set, get) => {
                 ...state,
                 machines: mergedMachines,
                 sessionListViewData
+            };
+        }),
+        deleteMachine: (machineId: string) => set((state) => {
+            if (!state.machines[machineId]) {
+                return state;
+            }
+            const { [machineId]: _removed, ...remaining } = state.machines;
+            return {
+                ...state,
+                machines: remaining,
+                sessionListViewData: buildSessionListViewData(state.sessions)
             };
         }),
         // Artifact methods
@@ -921,15 +1110,25 @@ export const storage = create<StorageState>()((set, get) => {
             
             // Remove session git status if it exists
             const { [sessionId]: deletedGitStatus, ...remainingGitStatus } = state.sessionGitStatus;
-            
-            // Clear drafts and permission modes from persistent storage
+            const { [sessionId]: _gitStatusFiles, ...remainingGitStatusFiles } = state.sessionGitStatusFiles;
+            const { [sessionId]: _fileCache, ...remainingFileCache } = state.sessionFileCache;
+
+            // Clear drafts, permission modes, model modes, effort levels from persistent storage
             const drafts = loadSessionDrafts();
             delete drafts[sessionId];
             saveSessionDrafts(drafts);
-            
+
             const modes = loadSessionPermissionModes();
             delete modes[sessionId];
             saveSessionPermissionModes(modes);
+
+            const modelModes = loadSessionModelModes();
+            delete modelModes[sessionId];
+            saveSessionModelModes(modelModes);
+
+            const effortLevels = loadSessionEffortLevels();
+            delete effortLevels[sessionId];
+            saveSessionEffortLevels(effortLevels);
             
             // Rebuild sessionListViewData without the deleted session
             const sessionListViewData = buildSessionListViewData(remainingSessions);
@@ -939,6 +1138,8 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: remainingSessions,
                 sessionMessages: remainingSessionMessages,
                 sessionGitStatus: remainingGitStatus,
+                sessionGitStatusFiles: remainingGitStatusFiles,
+                sessionFileCache: remainingFileCache,
                 sessionListViewData
             };
         }),
@@ -1122,10 +1323,12 @@ export function useLocalSettings(): LocalSettings {
     return storage(useShallow((state) => state.localSettings));
 }
 
-export function useAllMachines(): Machine[] {
+export function useAllMachines(options?: { includeOffline?: boolean }): Machine[] {
+    const includeOffline = options?.includeOffline ?? false;
     return storage(useShallow((state) => {
         if (!state.isDataReady) return [];
-        return (Object.values(state.machines).sort((a, b) => b.createdAt - a.createdAt)).filter((v) => v.active);
+        const machines = Object.values(state.machines).sort((a, b) => b.createdAt - a.createdAt);
+        return includeOffline ? machines : machines.filter((v) => v.active);
     }));
 }
 
@@ -1134,7 +1337,7 @@ export function useMachine(machineId: string): Machine | null {
 }
 
 export function useSessionListViewData(): SessionListViewItem[] | null {
-    return storage((state) => state.isDataReady ? state.sessionListViewData : null);
+    return storage(useDeepEqual((state) => state.isDataReady ? state.sessionListViewData : null));
 }
 
 export function useAllSessions(): Session[] {
@@ -1229,8 +1432,12 @@ export function useRealtimeStatus(): 'disconnected' | 'connecting' | 'connected'
     return storage(useShallow((state) => state.realtimeStatus));
 }
 
-export function useRealtimeMode(): 'idle' | 'speaking' {
+export function useRealtimeMode(): 'idle' | 'agent-speaking' | 'user-speaking' {
     return storage(useShallow((state) => state.realtimeMode));
+}
+
+export function useVoiceSessionGeneration(): number {
+    return storage(useShallow((state) => state.voiceSessionGeneration));
 }
 
 export function useSocketStatus() {
@@ -1243,6 +1450,14 @@ export function useSocketStatus() {
 
 export function useSessionGitStatus(sessionId: string): GitStatus | null {
     return storage(useShallow((state) => state.sessionGitStatus[sessionId] ?? null));
+}
+
+export function useSessionGitStatusFiles(sessionId: string): GitStatusFiles | null {
+    return storage(useShallow((state) => state.sessionGitStatusFiles[sessionId] ?? null));
+}
+
+export function useSessionFileCache(sessionId: string, filePath: string) {
+    return storage(useShallow((state) => state.sessionFileCache[sessionId]?.[filePath] ?? null));
 }
 
 export function useIsDataReady(): boolean {
