@@ -456,4 +456,67 @@ describe('MessageQueue2', () => {
         expect(batch3?.message).toBe('after-isolated');
         expect(batch3?.mode.type).toBe('B');
     });
+
+    describe('drain delay', () => {
+        it('merges trailing same-mode messages that arrive during the drain window', async () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+
+            queue.push('first', 'local');
+            // Schedule late arrivals during the drain window
+            setTimeout(() => queue.push('second', 'local'), 50);
+            setTimeout(() => queue.push('third', 'local'), 120);
+
+            const result = await queue.waitForMessagesAndGetAsString(undefined, 200);
+            expect(result?.message).toBe('first\nsecond\nthird');
+            expect(queue.size()).toBe(0);
+        });
+
+        it('does not extend the drain window past its limit', async () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+
+            queue.push('first', 'local');
+            // This arrives after the drain window — must NOT join the batch
+            setTimeout(() => queue.push('late', 'local'), 350);
+
+            const start = Date.now();
+            const result = await queue.waitForMessagesAndGetAsString(undefined, 150);
+            const elapsed = Date.now() - start;
+
+            expect(result?.message).toBe('first');
+            expect(elapsed).toBeLessThan(300);
+            expect(queue.size()).toBe(0);
+
+            // The late arrival should be in the queue once it lands
+            await new Promise(r => setTimeout(r, 250));
+            expect(queue.size()).toBe(1);
+        });
+
+        it('skips drain when the head item is isolated', async () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+
+            queue.pushIsolateAndClear('iso', 'local');
+            queue.push('next', 'local');
+
+            const start = Date.now();
+            const result = await queue.waitForMessagesAndGetAsString(undefined, 200);
+            const elapsed = Date.now() - start;
+
+            expect(result?.message).toBe('iso');
+            expect(elapsed).toBeLessThan(50);
+        });
+
+        it('drainDelayMs=0 preserves original immediate behavior', async () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+
+            queue.push('a', 'local');
+            queue.push('b', 'local');
+
+            const start = Date.now();
+            const result = await queue.waitForMessagesAndGetAsString();
+            const elapsed = Date.now() - start;
+
+            expect(result?.message).toBe('a\nb');
+            expect(elapsed).toBeLessThan(30);
+        });
+    });
 });

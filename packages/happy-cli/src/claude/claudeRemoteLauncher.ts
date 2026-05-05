@@ -315,7 +315,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             return p;
                         }
 
-                        let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
+                        // Drain trailing messages for 200ms so user inputs that land
+                        // back-to-back across a single turn boundary still join the same
+                        // collectBatch() call instead of being deferred to the next turn.
+                        const msg = await session.queue.waitForMessagesAndGetAsString(controller.signal, 200);
 
                         // Check if mode has changed
                         if (msg) {

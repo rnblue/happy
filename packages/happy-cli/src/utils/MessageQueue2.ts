@@ -220,26 +220,60 @@ export class MessageQueue2<T> {
     /**
      * Wait for messages and return all messages with the same mode as a single string
      * Returns { message: string, mode: T } or null if aborted/closed
+     *
+     * `drainDelayMs`: after the first message arrives (or is already queued),
+     * wait this long for additional same-mode messages to land before
+     * collecting the batch. Lets the user "trail" extra inputs into the same
+     * turn without requiring a result-roundtrip per message.
      */
-    async waitForMessagesAndGetAsString(abortSignal?: AbortSignal): Promise<{ message: string, mode: T, isolate: boolean, hash: string } | null> {
-        // If we have messages, return them immediately
-        if (this.queue.length > 0) {
-            return this.collectBatch();
+    async waitForMessagesAndGetAsString(
+        abortSignal?: AbortSignal,
+        drainDelayMs: number = 0
+    ): Promise<{ message: string, mode: T, isolate: boolean, hash: string } | null> {
+        // If queue is empty, wait for the first message
+        if (this.queue.length === 0) {
+            if (this.closed || abortSignal?.aborted) {
+                return null;
+            }
+            const hasMessages = await this.waitForMessages(abortSignal);
+            if (!hasMessages) {
+                return null;
+            }
         }
 
-        // If closed or already aborted, return null
-        if (this.closed || abortSignal?.aborted) {
-            return null;
-        }
-
-        // Wait for messages to arrive
-        const hasMessages = await this.waitForMessages(abortSignal);
-
-        if (!hasMessages) {
-            return null;
+        // Drain window: hold briefly after the first arrival so trailing
+        // messages (typed in quick succession or arriving over flaky sockets)
+        // join the same batch instead of being deferred to the next turn.
+        // Skipped when the head item is isolated — those must process alone.
+        if (drainDelayMs > 0 && this.queue.length > 0 && !this.queue[0].isolate) {
+            await this.sleepWithAbort(drainDelayMs, abortSignal);
+            if (this.closed || abortSignal?.aborted) {
+                return null;
+            }
         }
 
         return this.collectBatch();
+    }
+
+    private sleepWithAbort(ms: number, abortSignal?: AbortSignal): Promise<void> {
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                abortSignal?.removeEventListener('abort', onAbort);
+                resolve();
+            }, ms);
+            const onAbort = () => {
+                clearTimeout(timer);
+                resolve();
+            };
+            if (abortSignal) {
+                if (abortSignal.aborted) {
+                    clearTimeout(timer);
+                    resolve();
+                    return;
+                }
+                abortSignal.addEventListener('abort', onAbort, { once: true });
+            }
+        });
     }
 
     /**
