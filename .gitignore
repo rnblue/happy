@@ -69,3 +69,6 @@ docs/competition/opencode/traces/
 # scratch tooling
 .cdp-scripts/
 happy-workspaces/
+
+# iOS local archive/export output (xcodebuild)
+/packages/happy-app/build/

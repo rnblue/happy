@@ -25,11 +25,15 @@ read -p "Merge upstream/main? (y/n) " -n 1 -r
 echo ""
 
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    # 우리 변경사항(bundle ID 등)을 유지하면서 merge
-    git merge upstream/main --no-edit -X ours
+    # 우리 변경사항(bundle ID 등) 보존을 위해 충돌은 수동 해결 권장.
+    # -X ours는 큰 머지에서 upstream 변경을 통째로 덮어쓰는 위험이 있어 제거.
+    git merge upstream/main --no-edit
     echo ""
     echo "✓ Merged! Review changes and rebuild."
-    echo "  cd packages/happy-app && yarn prebuild && yarn ios:production"
+    echo "  export PATH=\"/Volumes/MoonBase/.pnpm-tools/bin:\$PATH\""
+    echo "  pnpm install"
+    echo "  pnpm --filter happy-app prebuild   # 새 native 디렉터리 생성 (~2분)"
+    echo "  pnpm --filter happy-app typecheck"
 else
     echo "Cancelled."
 fi
