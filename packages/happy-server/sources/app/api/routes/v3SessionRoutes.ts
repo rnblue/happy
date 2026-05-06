@@ -160,11 +160,13 @@ export function v3SessionRoutes(app: Fastify) {
             const newMessages = uniqueMessages.filter((message) => !existingByLocalId.has(message.localId));
             const seqs = await allocateSessionSeqBatch(sessionId, newMessages.length, tx);
 
-            const createdMessages: Omit<SelectedMessage, 'content'>[] = [];
-            for (let i = 0; i < newMessages.length; i += 1) {
-                const message = newMessages[i];
-                const createdMessage = await tx.sessionMessage.create({
-                    data: {
+            // Batch insert: one SQL round-trip instead of N. The previous
+            // for-loop blew past Prisma's default 5s transaction timeout
+            // whenever a turn produced a large message batch, throwing P2028
+            // mid-flight and leaving the client hung waiting for a response.
+            const createdMessages: Omit<SelectedMessage, 'content'>[] = newMessages.length > 0
+                ? await tx.sessionMessage.createManyAndReturn({
+                    data: newMessages.map((message, i) => ({
                         sessionId,
                         seq: seqs[i],
                         content: {
@@ -172,7 +174,7 @@ export function v3SessionRoutes(app: Fastify) {
                             c: message.content
                         },
                         localId: message.localId
-                    },
+                    })),
                     select: {
                         id: true,
                         seq: true,
@@ -181,9 +183,8 @@ export function v3SessionRoutes(app: Fastify) {
                         createdAt: true,
                         updatedAt: true
                     }
-                });
-                createdMessages.push(createdMessage);
-            }
+                })
+                : [];
 
             const responseMessages = [...existing, ...createdMessages].sort((a, b) => a.seq - b.seq);
 
@@ -191,7 +192,7 @@ export function v3SessionRoutes(app: Fastify) {
                 responseMessages,
                 createdMessages
             };
-        });
+        }, { timeout: 30000, maxWait: 10000 });
 
         for (const message of txResult.createdMessages) {
             const content = message.localId ? contentByLocalId.get(message.localId) : null;
