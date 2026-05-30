@@ -38,7 +38,10 @@ COPY packages/happy-wire ./packages/happy-wire
 COPY packages/happy-server ./packages/happy-server
 
 RUN pnpm --filter @slopus/happy-wire build
-RUN pnpm --filter happy-server-self-host build
+# Type-check only — the fly runtime starts from source via tsx (see CMD), so we
+# don't run the package `build` (which bundles standalone.ts with `bun`, a tool
+# not present in this node:20 image and not needed for the tsx entrypoint).
+RUN pnpm --filter happy-server-self-host typecheck
 
 # Stage 3: runtime
 FROM node:20 AS runner
