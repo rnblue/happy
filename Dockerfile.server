@@ -11,12 +11,17 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY scripts ./scripts
 COPY patches ./patches
 
-RUN mkdir -p packages/happy-app packages/happy-server packages/happy-cli packages/happy-wire
+RUN mkdir -p packages/happy-app packages/happy-server packages/happy-cli packages/happy-wire packages/happy-agent packages/happy-app-logs packages/codium
 
 COPY packages/happy-app/package.json packages/happy-app/
 COPY packages/happy-server/package.json packages/happy-server/
 COPY packages/happy-cli/package.json packages/happy-cli/
 COPY packages/happy-wire/package.json packages/happy-wire/
+# Additional workspace members (no postinstall) — needed so --frozen-lockfile
+# sees the full set of importers from pnpm-lock.yaml and doesn't bail out.
+COPY packages/happy-agent/package.json packages/happy-agent/
+COPY packages/happy-app-logs/package.json packages/happy-app-logs/
+COPY packages/codium/package.json packages/codium/
 
 # Workspace postinstall requirements
 COPY packages/happy-app/patches packages/happy-app/patches
@@ -33,7 +38,7 @@ COPY packages/happy-wire ./packages/happy-wire
 COPY packages/happy-server ./packages/happy-server
 
 RUN pnpm --filter @slopus/happy-wire build
-RUN pnpm --filter happy-server build
+RUN pnpm --filter happy-server-self-host build
 
 # Stage 3: runtime
 FROM node:20 AS runner
@@ -57,4 +62,4 @@ EXPOSE 3000
 
 # Command to run the application
 COPY --from=builder /repo/package.json /repo/pnpm-workspace.yaml /repo/
-CMD ["pnpm", "--filter", "happy-server", "start"]
+CMD ["pnpm", "--filter", "happy-server-self-host", "start"]
