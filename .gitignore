@@ -72,3 +72,10 @@ happy-workspaces/
 
 # iOS local archive/export output (xcodebuild)
 /packages/happy-app/build/
+
+# local HAPPY_HOME_DIR for self-host testing
+.happy-fully-local/
+.happy-dev/
+
+# third party tools
+.supervibe/

@@ -16,6 +16,8 @@ export default function FeaturesSettingsScreen() {
     const [hideInactiveSessions, setHideInactiveSessions] = useSettingMutable('hideInactiveSessions');
     const [expResumeSession, setExpResumeSession] = useSettingMutable('expResumeSession');
     const [fileDiffsSidebar, setFileDiffsSidebar] = useSettingMutable('fileDiffsSidebar');
+    const [groupToolCalls, setGroupToolCalls] = useSettingMutable('groupToolCalls');
+    const [expImageUpload, setExpImageUpload] = useSettingMutable('expImageUpload');
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
@@ -32,6 +34,18 @@ export default function FeaturesSettingsScreen() {
                         <Switch
                             value={fileDiffsSidebar}
                             onValueChange={setFileDiffsSidebar}
+                        />
+                    }
+                    showChevron={false}
+                />
+                <Item
+                    title={t('settingsFeatures.groupToolCalls')}
+                    subtitle={t('settingsFeatures.groupToolCallsSubtitle')}
+                    icon={<Ionicons name="layers-outline" size={29} color="#AF52DE" />}
+                    rightElement={
+                        <Switch
+                            value={groupToolCalls}
+                            onValueChange={setGroupToolCalls}
                         />
                     }
                     showChevron={false}
@@ -91,6 +105,20 @@ export default function FeaturesSettingsScreen() {
                     }
                     showChevron={false}
                 />
+                {/* Image upload hidden — broken, shipping next release
+                <Item
+                    title={t('settingsFeatures.imageUpload')}
+                    subtitle={t('settingsFeatures.imageUploadSubtitle')}
+                    icon={<Ionicons name="image-outline" size={29} color="#FF2D55" />}
+                    rightElement={
+                        <Switch
+                            value={expImageUpload}
+                            onValueChange={setExpImageUpload}
+                        />
+                    }
+                    showChevron={false}
+                />
+                */}
             </ItemGroup>
 
             {/* Privacy */}
