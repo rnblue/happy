@@ -12,13 +12,15 @@ interface AuthRequestStatus {
 export async function authApprove(token: string, publicKey: Uint8Array, answerV1: Uint8Array, answerV2: Uint8Array) {
     const API_ENDPOINT = getServerUrl();
     const publicKeyBase64 = encodeBase64(publicKey);
-    
+    // Use base64url for query params to avoid +/= URL encoding issues
+    const publicKeyBase64Url = encodeBase64(publicKey, 'base64url');
+
     // First, check the auth request status
     const statusResponse = await axios.get<AuthRequestStatus>(
         `${API_ENDPOINT}/v1/auth/request/status`,
         {
             params: {
-                publicKey: publicKeyBase64
+                publicKey: publicKeyBase64Url
             },
             headers: {
                 'X-Happy-Client': getHappyClientId(),
@@ -27,14 +29,12 @@ export async function authApprove(token: string, publicKey: Uint8Array, answerV1
     );
     
     const { status, supportsV2 } = statusResponse.data;
-    
+
     // Handle different status cases
     if (status === 'not_found') {
-        // Already authorized, no need to approve again
-        console.log('Auth request already authorized or not found');
-        return;
+        throw new Error('Auth request not found on server. The terminal may have timed out — try scanning the QR code again.');
     }
-    
+
     if (status === 'authorized') {
         // Already authorized, no need to approve again
         console.log('Auth request already authorized');

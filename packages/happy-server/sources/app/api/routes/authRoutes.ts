@@ -101,7 +101,10 @@ export function authRoutes(app: Fastify) {
         }
     }, async (request, reply) => {
         const tweetnacl = (await import("tweetnacl")).default;
-        const publicKey = privacyKit.decodeBase64(request.query.publicKey);
+        // Accept both base64url (from newer clients) and standard base64
+        const raw = request.query.publicKey;
+        const isBase64Url = raw.includes('-') || raw.includes('_') || !raw.includes('=');
+        const publicKey = privacyKit.decodeBase64(raw, isBase64Url ? 'base64url' : 'base64');
         const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
         if (!isValid) {
             return reply.send({ status: 'not_found', supportsV2: false });
